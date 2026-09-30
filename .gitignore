@@ -1,0 +1,8 @@
+# Local clutter
+.DS_Store
+__pycache__/
+node_modules/
+*.log
+
+# Never commit screenshots of the app (they could show real data)
+screenshots/
