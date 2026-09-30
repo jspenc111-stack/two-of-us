@@ -94,9 +94,13 @@ function respond_(method, req) {
 
     const routes = method === 'GET' ? {
       state: state_,
+      jarList: jarList_,
     } : {
       setMood: setMood_,
       clearMood: clearMood_,
+      jarAdd: jarAdd_,
+      jarEdit: jarEdit_,
+      jarDelete: jarDelete_,
     };
     const handler = Object.prototype.hasOwnProperty.call(routes, req.action) ? routes[req.action] : null;
     if (!handler) return json_({ error: 'bad_request', message: 'Unknown action' });
@@ -333,7 +337,7 @@ function state_(person, req, cfg) {
     names: { me: cfg.names[person], partner: cfg.names[other] },
     moods: { me: days[6].me, partner: days[6].partner },
     days: days,
-    jarCount: Math.max(0, sheet_('Jar').getLastRow() - 1),
+    jarCount: jarCount_(),
   };
 }
 
@@ -380,4 +384,90 @@ function deleteRows_(sheet, rows) {
   rows.map(function (r) { return r.row; })
     .sort(function (a, b) { return b - a; })
     .forEach(function (row) { sheet.deleteRow(row); });
+}
+
+// ---------------------------------------------------------------------------
+// Gratitude jar. Both people see every note; only the author can edit or delete one.
+// ---------------------------------------------------------------------------
+
+function jarNote_(r, person) {
+  return { id: str_(r.id), date: r.date, mine: r.person === person, text: str_(r.text), forPartner: isTrue_(r.forPartner) };
+}
+
+function isTrue_(value) {
+  return value === true || String(value).toUpperCase() === 'TRUE';
+}
+
+function jarText_(req) {
+  const text = cleanText_(req.text, JAR_TEXT_MAX, true);
+  if (!text) fail_('empty', 'Write something first');
+  return text;
+}
+
+function jarCount_() {
+  return Math.max(0, sheet_('Jar').getLastRow() - 1);
+}
+
+// Finds a note by id and checks it belongs to `person`. The server enforces this, not just the screen.
+function ownJarRow_(sheet, person, id, tz) {
+  const row = readRows_(sheet, tz).filter(function (r) {
+    return str_(r.id) === str_(id) && str_(id) !== '';
+  })[0];
+  if (!row) fail_('not_found', 'That note is no longer in the jar');
+  if (row.person !== person) fail_('forbidden', 'You can only change your own notes');
+  return row;
+}
+
+function time_(value) {
+  return isDate_(value) ? value.getTime() : 0;
+}
+
+/** All jar notes, newest first. */
+function jarList_(person, req, cfg) {
+  const notes = readRows_(sheet_('Jar'), cfg.tz)
+    .filter(function (r) { return str_(r.id) !== ''; })
+    .sort(function (a, b) {
+      if (a.date !== b.date) return a.date < b.date ? 1 : -1;
+      return (time_(b.createdAt) - time_(a.createdAt)) || (b.row - a.row);
+    })
+    .map(function (r) { return jarNote_(r, person); });
+  return { ok: true, version: VERSION, notes: notes };
+}
+
+/** {text, forPartner}. Max 280 characters. */
+function jarAdd_(person, req, cfg) {
+  const text = jarText_(req);
+  const forPartner = isTrue_(req.forPartner);
+  const note = withLock_(function () {
+    const id = Utilities.getUuid();
+    const today = today_(cfg.tz);
+    const now = new Date();
+    sheet_('Jar').appendRow([text_(id), text_(today), person, text_(text), forPartner, now, now]);
+    return { id: id, date: today, mine: true, text: text, forPartner: forPartner };
+  });
+  return { ok: true, note: note, jarCount: jarCount_() };
+}
+
+/** {id, text, forPartner}. Own notes only. */
+function jarEdit_(person, req, cfg) {
+  const text = jarText_(req);
+  const forPartner = isTrue_(req.forPartner);
+  const note = withLock_(function () {
+    const sheet = sheet_('Jar');
+    const r = ownJarRow_(sheet, person, req.id, cfg.tz);
+    sheet.getRange(r.row, 1, 1, 7).setValues([[text_(r.id), text_(r.date), person, text_(text), forPartner, r.createdAt, new Date()]]);
+    r.text = text;
+    r.forPartner = forPartner;
+    return jarNote_(r, person);
+  });
+  return { ok: true, note: note, jarCount: jarCount_() };
+}
+
+/** {id}. Own notes only. */
+function jarDelete_(person, req, cfg) {
+  withLock_(function () {
+    const sheet = sheet_('Jar');
+    sheet.deleteRow(ownJarRow_(sheet, person, req.id, cfg.tz).row);
+  });
+  return { ok: true, jarCount: jarCount_() };
 }

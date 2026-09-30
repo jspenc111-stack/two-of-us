@@ -501,6 +501,81 @@ test('requests never write moods or notes to the log', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Back end: gratitude jar
+// ---------------------------------------------------------------------------
+
+test('jar: add saves author, date, text and "for partner"', () => {
+  const b = loadBackend();
+  const res = b.post(KEY_A, 'jarAdd', { text: '  The sunset tonight\nand you  ', forPartner: true });
+  assert.strictEqual(res.ok, true);
+  assert.deepStrictEqual(Object.assign({}, res.note, { id: 'x' }), { id: 'x', date: '2026-09-30', mine: true, text: 'The sunset tonight\nand you', forPartner: true });
+  assert.strictEqual(res.jarCount, 1);
+  const row = b.rows('Jar')[0];
+  assert.deepStrictEqual(row.slice(0, 5), [res.note.id, '2026-09-30', 'A', 'The sunset tonight\nand you', true]);
+  b.post(KEY_B, 'jarAdd', { text: 'Soup', forPartner: false });
+  assert.strictEqual(b.rows('Jar')[1][4], false);
+  assert.notStrictEqual(b.rows('Jar')[1][0], res.note.id);
+  assert.strictEqual(b.get(KEY_B, 'state').jarCount, 2);
+});
+
+test('jar: length limits (1 to 280 characters after trimming)', () => {
+  const b = loadBackend();
+  for (const text of ['', '   ', '\n\n', undefined]) assert.strictEqual(b.post(KEY_A, 'jarAdd', { text }).error, 'empty');
+  assert.strictEqual(b.post(KEY_A, 'jarAdd', { text: 'x'.repeat(281) }).error, 'too_long');
+  assert.strictEqual(b.rows('Jar').length, 0);
+  assert.strictEqual(b.post(KEY_A, 'jarAdd', { text: ' ' + 'x'.repeat(280) + ' ' }).note.text.length, 280);
+  const id = b.rows('Jar')[0][0];
+  assert.strictEqual(b.post(KEY_A, 'jarEdit', { id, text: 'y'.repeat(281) }).error, 'too_long');
+  assert.strictEqual(b.post(KEY_A, 'jarEdit', { id, text: ' ' }).error, 'empty');
+  assert.strictEqual(b.rows('Jar')[0][3], 'x'.repeat(280));
+  assert.strictEqual(b.post(KEY_A, 'jarAdd', { text: '=HYPERLINK("x")' }).note.text, '=HYPERLINK("x")');
+  assert.strictEqual(b.rows('Jar')[1][3], '=HYPERLINK("x")');
+});
+
+test('jar: list is newest first and both people see every note', () => {
+  const b = loadBackend({ now: '2026-09-01T15:00:00Z' });
+  b.post(KEY_A, 'jarAdd', { text: 'first' });
+  b.env.now = Date.parse('2026-09-20T15:00:00Z');
+  b.post(KEY_B, 'jarAdd', { text: 'second', forPartner: true });
+  b.env.now += 60000;
+  b.post(KEY_A, 'jarAdd', { text: 'third' });
+  b.env.now = Date.parse('2026-09-30T15:00:00Z');
+  b.post(KEY_B, 'jarAdd', { text: 'fourth' });
+
+  const a = b.get(KEY_A, 'jarList');
+  assert.strictEqual(a.ok, true);
+  assert.deepStrictEqual(a.notes.map((n) => n.text), ['fourth', 'third', 'second', 'first']);
+  assert.deepStrictEqual(a.notes.map((n) => n.mine), [false, true, false, true]);
+  assert.deepStrictEqual(a.notes.map((n) => n.date), ['2026-09-30', '2026-09-20', '2026-09-20', '2026-09-01']);
+  assert.strictEqual(a.notes[2].forPartner, true);
+  const bList = b.get(KEY_B, 'jarList');
+  assert.deepStrictEqual(bList.notes.map((n) => n.mine), [true, false, true, false]);
+  assert.deepStrictEqual(b.get('nope', 'jarList'), { error: 'unauthorized' });
+});
+
+test('jar: edit and delete your own notes only (checked on the server)', () => {
+  const b = loadBackend();
+  const mine = b.post(KEY_A, 'jarAdd', { text: 'mine' }).note;
+  const theirs = b.post(KEY_B, 'jarAdd', { text: 'theirs' }).note;
+
+  const edited = b.post(KEY_A, 'jarEdit', { id: mine.id, text: 'mine, edited', forPartner: true });
+  assert.deepStrictEqual(Object.assign({}, edited.note), { id: mine.id, date: '2026-09-30', mine: true, text: 'mine, edited', forPartner: true });
+  assert.strictEqual(b.rows('Jar')[0][2], 'A');
+
+  assert.strictEqual(b.post(KEY_A, 'jarEdit', { id: theirs.id, text: 'hijack' }).error, 'forbidden');
+  assert.strictEqual(b.post(KEY_A, 'jarDelete', { id: theirs.id }).error, 'forbidden');
+  assert.strictEqual(b.rows('Jar')[1][3], 'theirs');
+  assert.strictEqual(b.post(KEY_A, 'jarEdit', { id: 'missing', text: 'x' }).error, 'not_found');
+  assert.strictEqual(b.post(KEY_A, 'jarDelete', { id: '' }).error, 'not_found');
+  assert.strictEqual(b.post('nope', 'jarDelete', { id: mine.id }).error, 'unauthorized');
+
+  assert.deepStrictEqual(b.post(KEY_A, 'jarDelete', { id: mine.id }), { ok: true, jarCount: 1 });
+  assert.deepStrictEqual(b.rows('Jar').map((r) => r[3]), ['theirs']);
+  assert.strictEqual(b.post(KEY_B, 'jarDelete', { id: theirs.id }).jarCount, 0);
+  assert.strictEqual(b.env.lock.held, false);
+});
+
+// ---------------------------------------------------------------------------
 // Back end: least privilege
 // ---------------------------------------------------------------------------
 
@@ -632,6 +707,16 @@ test('demo mode answers like the real back end (made-up names only)', async () =
   assert.strictEqual(demoState.version, realState.version);
   assert.strictEqual((await demo.request('setMood', { mood: 'meh' })).error, 'bad_request');
   assert.strictEqual((await demo.request('clearMood')).moods.me, null);
+
+  const realAdd = real.post(KEY_A, 'jarAdd', { text: 'hello', forPartner: true });
+  const demoAdd = await demo.request('jarAdd', { text: 'hello', forPartner: true });
+  assert.deepStrictEqual(shape(demoAdd), shape(realAdd));
+  assert.deepStrictEqual(shape(await demo.request('jarList')), shape(real.get(KEY_A, 'jarList')));
+  assert.deepStrictEqual(shape(await demo.request('jarEdit', { id: demoAdd.note.id, text: 'hi' })), shape(real.post(KEY_A, 'jarEdit', { id: realAdd.note.id, text: 'hi' })));
+  assert.deepStrictEqual(await demo.request('jarDelete', { id: demoAdd.note.id }), { ok: true, jarCount: 12 });
+  const partnerNote = (await demo.request('jarList')).notes.find((n) => !n.mine);
+  assert.strictEqual((await demo.request('jarDelete', { id: partnerNote.id })).error, 'forbidden');
+  assert.strictEqual((await demo.request('jarAdd', { text: 'x'.repeat(281) })).error, 'too_long');
 });
 
 // ---------------------------------------------------------------------------

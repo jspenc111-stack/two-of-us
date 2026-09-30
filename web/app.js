@@ -14,6 +14,7 @@
   const EXPECTED_BACKEND_VERSION = 1;
   const STORE_KEY = 'two-of-us-link';
   const MOOD_NOTE_MAX = 140;
+  const JAR_TEXT_MAX = 280;
   const REQUEST_TIMEOUT_MS = 20000;
   const REFRESH_AFTER_MS = 15000;
 
@@ -29,7 +30,14 @@
     setup: 'Open your personal setup link to get started.',
     badkey: 'This link no longer works. Ask for a new setup link.',
     badlink: "This setup link isn't complete. Ask for a new setup link.",
+    too_long: 'That is a little too long.',
+    empty: 'Write something first.',
+    forbidden: 'You can only change your own notes.',
+    not_found: 'That note is no longer in the jar.',
   };
+
+  // Screens. Tabs sit at the bottom; the others open on top and close with Back.
+  const VIEWS = { today: 'view-today', jar: 'view-jar', 'jar-all': 'view-jar-all', 'jar-form': 'view-jar-form' };
 
   // Everything the app knows lives here, in memory only.
   const app = {
@@ -40,6 +48,17 @@
     refreshing: false,
     pendingWrites: 0,
     noteEditor: { open: false, text: '' },
+    blocked: false, // showing a message instead of the app
+    tab: 'today',
+    sub: null, // a screen opened on top of a tab
+    jar: null, // jar notes, newest first
+    jarLoadedAt: 0,
+    jarLoading: null,
+    jarFilter: 'all',
+    pulledId: null,
+    draft: null, // the jar note being written: { id, text, forPartner }
+    formError: '',
+    saving: false,
   };
 
   // -------------------------------------------------------------------------
@@ -63,6 +82,11 @@
       el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
     }
     return el;
+  }
+
+  // Replaces an element's contents, skipping empty parts (null, false).
+  function fill(el, ...kids) {
+    el.replaceChildren(...kids.flat(Infinity).filter((k) => k != null && k !== false));
   }
 
   function moodInfo(value) {
@@ -106,6 +130,29 @@
     document.body.append(dialog);
     dialog.showModal();
     return dialog;
+  }
+
+  // Asks a yes/no question. Resolves to true only if the confirm button was tapped.
+  function confirmSheet(title, confirmLabel, body) {
+    return new Promise((resolve) => {
+      let answer = false;
+      const sheet = showSheet(
+        [h('h2', null, title), body ? h('p', { class: 'muted' }, body) : null],
+        [
+          h('button', { type: 'button', class: 'btn', onclick: () => sheet.close() }, 'Cancel'),
+          h('button', { type: 'button', class: 'btn btn-primary', onclick: () => { answer = true; sheet.close(); } }, confirmLabel),
+        ]
+      );
+      sheet.addEventListener('close', () => resolve(answer));
+    });
+  }
+
+  function jarArt(count) {
+    const svg = $('jar-art').content.firstElementChild.cloneNode(true);
+    svg.querySelectorAll('.slip').forEach((slip, i) => {
+      if (i >= count) slip.setAttribute('display', 'none');
+    });
+    return svg;
   }
 
   // -------------------------------------------------------------------------
@@ -228,13 +275,22 @@
     app.data = s;
     app.loadedAt = Date.now();
     renderToday();
+    if (app.jar && app.jar.length !== s.jarCount) {
+      app.jarLoadedAt = 0; // the other person changed the jar
+      if (currentView() === 'jar' || currentView() === 'jar-all') loadJar();
+    }
+    if (currentView() === 'jar') renderJar();
+  }
+
+  function errorText(err) {
+    return COPY[err && err.code] || COPY.offline;
   }
 
   function handleError(err) {
     const code = err && err.code;
     if (code === 'unauthorized') return showMessage('badkey');
-    if (code === 'too_long') return toast('That note is a little too long.');
-    toast(COPY.offline);
+    if (code === 'forbidden' || code === 'not_found') loadJar(true);
+    toast(errorText(err));
   }
 
   // -------------------------------------------------------------------------
@@ -246,11 +302,11 @@
     const d = app.data;
     if (!d) {
       view.setAttribute('aria-busy', 'true');
-      view.replaceChildren(todaySkeleton());
+      fill(view, todaySkeleton());
       return;
     }
     view.removeAttribute('aria-busy');
-    view.replaceChildren(
+    fill(view,
       h('p', { class: 'date-line' }, formatDay(d.today, { weekday: 'long', month: 'long', day: 'numeric' })),
       myMoodCard(d),
       partnerCard(d),
@@ -460,26 +516,308 @@
   }
 
   // -------------------------------------------------------------------------
+  // Gratitude jar
+  // -------------------------------------------------------------------------
+
+  function names() {
+    return app.data ? app.data.names : { me: 'You', partner: 'Your partner' };
+  }
+
+  function jarCount() {
+    if (app.jar) return app.jar.length;
+    return app.data ? app.data.jarCount : null;
+  }
+
+  function loadJar(force) {
+    if (app.jarLoading) return app.jarLoading;
+    if (!force && app.jar && Date.now() - app.jarLoadedAt < REFRESH_AFTER_MS) return Promise.resolve();
+    app.jarLoading = (async () => {
+      try {
+        const res = await api('jarList');
+        app.jar = res.notes;
+        app.jarLoadedAt = Date.now();
+        if (app.data) app.data.jarCount = res.notes.length;
+      } catch (err) {
+        handleError(err);
+      } finally {
+        app.jarLoading = null;
+        if (currentView() === 'jar') renderJar();
+        if (currentView() === 'jar-all') renderJarAll();
+      }
+    })();
+    return app.jarLoading;
+  }
+
+  function renderJar() {
+    const count = jarCount();
+    const pulled = app.jar && app.jar.find((n) => n.id === app.pulledId);
+    let countText = '';
+    if (count === 0) countText = 'The jar is empty';
+    else if (count === 1) countText = '1 note';
+    else if (count > 1) countText = count + ' notes';
+    fill($('view-jar'),
+      h('div', { class: 'card jar-hero' },
+        jarArt(count || 0),
+        h('p', { class: 'jar-count' }, countText),
+        count === 0 ? h('p', { class: 'muted' }, "Drop in something you're grateful for.") : null
+      ),
+      h('button', { type: 'button', class: 'btn btn-primary btn-block btn-big', onclick: () => openJarForm(null) }, '+ Add to the jar'),
+      h('div', { class: 'jar-buttons' },
+        h('button', { type: 'button', class: 'btn', disabled: count === 0, onclick: pullOne }, pulled ? 'Pull another' : 'Pull one out'),
+        h('button', { type: 'button', class: 'btn', disabled: count === 0, onclick: () => openSub('jar-all') }, 'See all')
+      ),
+      pulled ? noteCard(pulled, { pulled: true }) : null
+    );
+  }
+
+  async function pullOne() {
+    if (!app.jar) await loadJar(true);
+    const notes = app.jar || [];
+    if (!notes.length) return;
+    let pick = notes[Math.floor(Math.random() * notes.length)];
+    while (notes.length > 1 && pick.id === app.pulledId) pick = notes[Math.floor(Math.random() * notes.length)];
+    app.pulledId = pick.id;
+    renderJar();
+    focusLater('pulled-note');
+  }
+
+  function noteDate(ymd) {
+    const sameYear = app.data && ymd.slice(0, 4) === app.data.today.slice(0, 4);
+    return formatDay(ymd, sameYear ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+
+  function noteCard(n, opts) {
+    const who = names();
+    const forText = n.forPartner ? (n.mine ? 'for ' + who.partner : 'for you') : null;
+    return h('article', {
+      class: 'note-card' + (opts.pulled ? ' is-pulled' : ''),
+      id: opts.pulled ? 'pulled-note' : null,
+      tabindex: opts.pulled ? '-1' : null,
+    },
+    h('p', { class: 'note-text' }, n.text),
+    h('p', { class: 'note-meta' },
+      h('span', { class: 'note-author' }, n.mine ? who.me : who.partner),
+      h('span', { 'aria-hidden': 'true' }, '·'),
+      h('span', null, noteDate(n.date)),
+      forText ? h('span', { class: 'tag' }, forText) : null
+    ),
+    opts.actions && n.mine
+      ? h('div', { class: 'note-actions' },
+        h('button', { type: 'button', class: 'btn btn-quiet', onclick: () => openJarForm(n) }, 'Edit'),
+        h('button', { type: 'button', class: 'btn btn-quiet', onclick: () => deleteJarNote(n) }, 'Delete'))
+      : null
+    );
+  }
+
+  function renderJarAll(focusChip) {
+    const view = $('view-jar-all');
+    const filters = [['all', 'Everyone'], ['mine', 'Mine'], ['partner', names().partner]];
+    const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Show notes from' },
+      filters.map(([value, label]) => h('button', {
+        type: 'button',
+        class: 'chip',
+        'aria-pressed': String(app.jarFilter === value),
+        onclick: () => {
+          app.jarFilter = value;
+          renderJarAll(true);
+        },
+      }, label)));
+    if (!app.jar) {
+      fill(view, chips, h('div', { class: 'note-list', 'aria-label': 'Loading' },
+        [1, 2, 3].map(() => h('div', { class: 'note-card' }, h('div', { class: 'skel skel-line' }), h('div', { class: 'skel skel-line short' })))));
+      return;
+    }
+    const notes = app.jar.filter((n) => app.jarFilter === 'all' || (app.jarFilter === 'mine') === n.mine);
+    const list = [];
+    let month = '';
+    for (const n of notes) {
+      if (n.date.slice(0, 7) !== month) {
+        month = n.date.slice(0, 7);
+        list.push(h('h2', { class: 'month' }, formatDay(month + '-01', { month: 'long', year: 'numeric' })));
+      }
+      list.push(noteCard(n, { actions: true }));
+    }
+    fill(view, chips, notes.length ? h('div', { class: 'note-list' }, list) : h('p', { class: 'muted empty' }, 'No notes here yet.'));
+    if (focusChip) view.querySelector('.chip[aria-pressed="true"]').focus();
+  }
+
+  function openJarForm(note) {
+    const id = note ? note.id : null;
+    // A draft for the same note is kept (for example after a failed save), so nothing typed is lost.
+    if (!app.draft || app.draft.id !== id) {
+      app.draft = note ? { id, text: note.text, forPartner: note.forPartner } : { id: null, text: '', forPartner: false };
+    }
+    app.formError = '';
+    openSub('jar-form');
+    focusLater('jar-text');
+  }
+
+  function renderJarForm() {
+    const d = app.draft || (app.draft = { id: null, text: '', forPartner: false });
+    const count = h('span', { class: 'counter', id: 'jar-count' }, counterText(d.text.length, JAR_TEXT_MAX));
+    const save = h('button', { type: 'submit', class: 'btn btn-primary', disabled: !d.text.trim() || app.saving }, app.saving ? 'Saving…' : 'Save');
+    const textarea = h('textarea', {
+      id: 'jar-text',
+      class: 'textarea',
+      rows: 5,
+      maxlength: JAR_TEXT_MAX,
+      placeholder: "Something you're grateful for…",
+      'aria-label': 'Your note',
+      'aria-describedby': 'jar-count',
+      oninput: () => {
+        d.text = textarea.value;
+        count.textContent = counterText(d.text.length, JAR_TEXT_MAX);
+        save.disabled = !d.text.trim() || app.saving;
+      },
+    });
+    textarea.value = d.text;
+    const toggle = h('input', { type: 'checkbox', role: 'switch', id: 'jar-for', onchange: () => { d.forPartner = toggle.checked; } });
+    toggle.checked = d.forPartner;
+    fill($('view-jar-form'), h('form', {
+      class: 'card form-card',
+      novalidate: true,
+      onsubmit: (e) => {
+        e.preventDefault();
+        saveJarNote();
+      },
+    },
+    textarea,
+    h('div', { class: 'row between' },
+      h('label', { class: 'switch', for: 'jar-for' }, toggle, h('span', null, 'For ' + names().partner)),
+      count
+    ),
+    app.formError ? h('p', { class: 'form-error', role: 'alert' }, app.formError) : null,
+    h('div', { class: 'row' },
+      save,
+      h('button', { type: 'button', class: 'btn btn-quiet', onclick: closeSub }, 'Cancel')
+    )));
+  }
+
+  async function saveJarNote() {
+    const d = app.draft;
+    if (!d || !d.text.trim() || app.saving) return;
+    app.saving = true;
+    app.formError = '';
+    renderJarForm();
+    try {
+      const params = { text: d.text, forPartner: d.forPartner };
+      const res = d.id ? await write('jarEdit', Object.assign({ id: d.id }, params)) : await write('jarAdd', params);
+      if (app.jar) app.jar = d.id ? app.jar.map((n) => (n.id === d.id ? res.note : n)) : [res.note].concat(app.jar);
+      if (app.data) app.data.jarCount = res.jarCount;
+      app.draft = null;
+      app.saving = false;
+      toast(d.id ? 'Saved' : 'Added to the jar');
+      closeSub();
+    } catch (err) {
+      app.saving = false;
+      if (err.code === 'unauthorized') return showMessage('badkey');
+      if (err.code === 'forbidden' || err.code === 'not_found') {
+        app.draft = null;
+        loadJar(true);
+        toast(errorText(err));
+        return closeSub();
+      }
+      app.formError = errorText(err); // the typed text stays in the form
+      renderJarForm();
+    }
+  }
+
+  async function deleteJarNote(n) {
+    if (!(await confirmSheet('Remove this note?', 'Remove'))) return;
+    try {
+      const res = await write('jarDelete', { id: n.id });
+      if (app.jar) app.jar = app.jar.filter((x) => x.id !== n.id);
+      if (app.pulledId === n.id) app.pulledId = null;
+      if (app.data) app.data.jarCount = res.jarCount;
+      if (currentView() === 'jar-all') renderJarAll();
+      toast('Removed');
+    } catch (err) {
+      handleError(err);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Moving between screens
+  // -------------------------------------------------------------------------
+
+  function currentView() {
+    return app.sub || app.tab;
+  }
+
+  function show() {
+    if (app.blocked) return;
+    const view = currentView();
+    for (const [name, id] of Object.entries(VIEWS)) $(id).hidden = name !== view;
+    $('view-message').hidden = true;
+    $('tabbar').hidden = !!app.sub;
+    $('back-btn').hidden = !app.sub;
+    let title = 'Two of Us';
+    if (view === 'jar-all') title = 'All notes';
+    if (view === 'jar-form') title = app.draft && app.draft.id ? 'Edit note' : 'Add to the jar';
+    $('title').textContent = title;
+    document.querySelectorAll('.tab').forEach((tab) => {
+      if (tab.dataset.tab === app.tab) tab.setAttribute('aria-current', 'page');
+      else tab.removeAttribute('aria-current');
+    });
+    if (view === 'today') renderToday();
+    if (view === 'jar') renderJar();
+    if (view === 'jar-all') renderJarAll();
+    if (view === 'jar-form') renderJarForm();
+  }
+
+  function setTab(tab) {
+    app.tab = tab;
+    show();
+    window.scrollTo(0, 0);
+    if (tab === 'jar') loadJar();
+  }
+
+  // Screens on top of a tab get a browser history entry, so the phone's Back gesture closes them.
+  function openSub(name) {
+    app.sub = name;
+    history.pushState({ sub: name }, '');
+    show();
+    window.scrollTo(0, 0);
+    if (name === 'jar-all') loadJar();
+  }
+
+  function closeSub() {
+    if (app.sub) history.back();
+  }
+
+  // -------------------------------------------------------------------------
   // Messages instead of the app (not set up yet, old link)
   // -------------------------------------------------------------------------
 
   function showMessage(kind) {
+    app.blocked = true;
     document.querySelectorAll('.view').forEach((v) => {
       v.hidden = true;
     });
+    $('tabbar').hidden = true;
+    $('back-btn').hidden = true;
+    $('title').textContent = 'Two of Us';
     const view = $('view-message');
-    const kids = [h('p', { class: 'message-text' }, COPY[kind])];
+    const kids = [jarArt(kind === 'setup' ? 3 : 0), h('p', { class: 'message-text' }, COPY[kind])];
     if (kind === 'setup') {
       kids.push(h('p', { class: 'message-sub' }, 'Each of you has your own link. It comes from the person who set up the app.'));
       if (!app.demo) kids.push(h('a', { class: 'link', href: '?demo' }, 'Preview with made-up data'));
     }
-    view.replaceChildren(...kids);
+    fill(view, ...kids);
     view.hidden = false;
   }
 
   function showApp() {
-    $('view-message').hidden = true;
-    $('view-today').hidden = false;
+    app.blocked = false;
+    if (history.state && history.state.sub) history.replaceState(null, '');
+    document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => setTab(tab.dataset.tab)));
+    $('back-btn').addEventListener('click', closeSub);
+    window.addEventListener('popstate', (e) => {
+      const sub = e.state && e.state.sub;
+      app.sub = VIEWS[sub] ? sub : null;
+      show();
+    });
+    show();
   }
 
   // -------------------------------------------------------------------------
@@ -507,7 +845,6 @@
     }
 
     showApp();
-    renderToday();
     refresh();
 
     document.addEventListener('visibilitychange', () => {

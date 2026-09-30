@@ -17,15 +17,58 @@
 </head>
 <body>
   <header class="topbar">
+    <button type="button" class="icon-btn" id="back-btn" aria-label="Back" hidden>
+      <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true" focusable="false"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
     <h1 class="app-title" id="title">Two of Us</h1>
     <span class="pill" id="demo-pill" hidden>Demo</span>
   </header>
 
   <main id="main">
     <section id="view-today" class="view" aria-label="Today" hidden></section>
+    <section id="view-jar" class="view" aria-label="Jar" hidden></section>
+    <section id="view-jar-all" class="view" aria-label="All notes" hidden></section>
+    <section id="view-jar-form" class="view" aria-label="Jar note" hidden></section>
     <section id="view-message" class="view view-message" hidden></section>
   </main>
 
+  <nav class="tabbar" id="tabbar" aria-label="Sections" hidden>
+    <button type="button" class="tab" data-tab="today">
+      <span class="tab-icon">
+        <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4.2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </span>
+      <span>Today</span>
+    </button>
+    <button type="button" class="tab" data-tab="jar">
+      <span class="tab-icon">
+        <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" focusable="false"><path d="M8 3.5h8M8.5 3.5v2.3c-2.2.9-3.5 2.6-3.5 4.9v7.1c0 1.7 1.3 2.7 3 2.7h8c1.7 0 3-1 3-2.7v-7.1c0-2.3-1.3-4-3.5-4.9V3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 16.2c-1.6-1.1-3-2.2-3-3.5 0-.9.7-1.6 1.5-1.6.6 0 1.1.3 1.5.9.4-.6.9-.9 1.5-.9.8 0 1.5.7 1.5 1.6 0 1.3-1.4 2.4-3 3.5z" fill="currentColor"/></svg>
+      </span>
+      <span>Jar</span>
+    </button>
+  </nav>
+
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <!-- The jar drawing. Slips of paper are shown according to how many notes there are. -->
+  <template id="jar-art">
+    <svg class="jar-art" viewBox="0 0 120 150" aria-hidden="true" focusable="false">
+      <rect class="jar-lid" x="28" y="4" width="64" height="16" rx="6"/>
+      <rect class="jar-neck" x="33" y="20" width="54" height="9" rx="3"/>
+      <path class="jar-glass" d="M36 29h48c11 0 18 8 18 19v76c0 12-9 20-20 20H38c-11 0-20-8-20-20V48c0-11 7-19 18-19z"/>
+      <g class="jar-slips">
+        <rect class="slip c1" x="28" y="118" width="26" height="14" rx="3" transform="rotate(-10 41 125)"/>
+        <rect class="slip c2" x="58" y="120" width="26" height="14" rx="3" transform="rotate(8 71 127)"/>
+        <rect class="slip c3" x="44" y="104" width="26" height="14" rx="3" transform="rotate(4 57 111)"/>
+        <rect class="slip c4" x="70" y="102" width="22" height="14" rx="3" transform="rotate(-14 81 109)"/>
+        <rect class="slip c2" x="26" y="100" width="22" height="14" rx="3" transform="rotate(12 37 107)"/>
+        <rect class="slip c1" x="52" y="88" width="26" height="14" rx="3" transform="rotate(-6 65 95)"/>
+        <rect class="slip c3" x="30" y="84" width="22" height="14" rx="3" transform="rotate(-16 41 91)"/>
+        <rect class="slip c4" x="74" y="84" width="20" height="14" rx="3" transform="rotate(10 84 91)"/>
+        <rect class="slip c1" x="46" y="70" width="24" height="14" rx="3" transform="rotate(9 58 77)"/>
+      </g>
+      <path class="jar-heart" d="M60 64c-5-7-15-4-14 4 1 5 8 9 14 13 6-4 13-8 14-13 1-8-9-11-14-4z"/>
+      <path class="jar-shine" d="M29 52v44"/>
+    </svg>
+  </template>
 </body>
 </html>

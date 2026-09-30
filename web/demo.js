@@ -12,6 +12,7 @@
   const VERSION = 1;
   const MOODS = ['great', 'good', 'okay', 'rough'];
   const MOOD_NOTE_MAX = 140;
+  const JAR_TEXT_MAX = 280;
   const NAMES = { A: 'Sam', B: 'Alex' };
   const ME = 'A';
   const PARTNER = 'B';
@@ -57,10 +58,34 @@
     });
   }
 
+  function seedJar(db, today) {
+    // [days ago, author, text, for the other person]
+    [
+      [-62, ME, 'You waited up for me.', true],
+      [-55, PARTNER, 'A surprise postcard in the mail.', false],
+      [-48, ME, 'A slow morning with nowhere to be.', false],
+      [-41, PARTNER, 'Laughing so hard at breakfast that the tea went cold.', false],
+      [-34, ME, 'Finding out the good bakery opens early.', false],
+      [-30, PARTNER, 'You fixed my bike without being asked.', true],
+      [-21, ME, "The neighbour's cat visiting again.", false],
+      [-15, PARTNER, 'Rainy Sunday, board games, tea.', false],
+      [-9, ME, 'You remembered the thing I mentioned weeks ago.', true],
+      [-6, PARTNER, 'Clean sheets day.', false],
+      [-3, ME, 'The sunset on our walk tonight.', false],
+      [-1, PARTNER, 'Thank you for making dinner when I was running late.', true],
+    ].forEach(function (n, i) {
+      db.jar.push({ id: 'demo-' + (i + 1), date: addDays(today, n[0]), person: n[1], text: n[2], forPartner: n[3], order: i });
+    });
+  }
+
   function create(scenario) {
     const today = localToday();
     const db = { moods: [], jar: [] };
-    if (scenario !== 'empty') seedMoods(db, today);
+    if (scenario !== 'empty') {
+      seedMoods(db, today);
+      seedJar(db, today);
+    }
+    let nextId = db.jar.length + 1;
     const delay = scenario === 'slow' ? 2500 : 350;
     let calls = 0;
 
@@ -104,7 +129,66 @@
       return state();
     }
 
-    const actions = { state: state, setMood: setMood, clearMood: clearMood };
+    function note(n) {
+      return { id: n.id, date: n.date, mine: n.person === ME, text: n.text, forPartner: n.forPartner };
+    }
+
+    function jarList() {
+      const notes = db.jar.slice().sort(function (a, b) {
+        if (a.date !== b.date) return a.date < b.date ? 1 : -1;
+        return b.order - a.order;
+      });
+      return { ok: true, version: VERSION, notes: notes.map(note) };
+    }
+
+    function jarText(p) {
+      const text = cleanText(p.text, true);
+      if (!text) return { error: fail('empty') };
+      if (text.length > JAR_TEXT_MAX) return { error: fail('too_long') };
+      return { text: text };
+    }
+
+    function ownNote(id) {
+      const n = db.jar.find(function (x) { return x.id === id; });
+      if (!n) return { error: fail('not_found') };
+      if (n.person !== ME) return { error: fail('forbidden') };
+      return { note: n };
+    }
+
+    function jarAdd(p) {
+      const t = jarText(p);
+      if (t.error) return t.error;
+      const n = { id: 'demo-' + nextId++, date: today, person: ME, text: t.text, forPartner: p.forPartner === true, order: nextId };
+      db.jar.push(n);
+      return { ok: true, note: note(n), jarCount: db.jar.length };
+    }
+
+    function jarEdit(p) {
+      const t = jarText(p);
+      if (t.error) return t.error;
+      const found = ownNote(p.id);
+      if (found.error) return found.error;
+      found.note.text = t.text;
+      found.note.forPartner = p.forPartner === true;
+      return { ok: true, note: note(found.note), jarCount: db.jar.length };
+    }
+
+    function jarDelete(p) {
+      const found = ownNote(p.id);
+      if (found.error) return found.error;
+      db.jar = db.jar.filter(function (x) { return x !== found.note; });
+      return { ok: true, jarCount: db.jar.length };
+    }
+
+    const actions = {
+      state: state,
+      setMood: setMood,
+      clearMood: clearMood,
+      jarList: jarList,
+      jarAdd: jarAdd,
+      jarEdit: jarEdit,
+      jarDelete: jarDelete,
+    };
 
     function handle(action, params) {
       calls++;
