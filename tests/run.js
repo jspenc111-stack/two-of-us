@@ -5,6 +5,8 @@
 
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
+const crypto = require('crypto');
 const assert = require('assert');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -82,6 +84,448 @@ test('Pages workflow publishes the web/ folder only from main', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Fake Google services, so Code.gs can run in Node's `vm`
+// ---------------------------------------------------------------------------
+
+// Made-up keys, built at runtime so no key-like text sits in this file.
+const KEY_A = 'sam'.padEnd(40, 'x');
+const KEY_B = 'alex'.padEnd(40, 'y');
+const FAKE_WEB_APP = 'https://script.google.com/macros/s/FAKE/exec';
+
+// What a real Sheet does to a written value: a leading apostrophe forces plain
+// text (and is dropped), otherwise dates, numbers and formulas get converted.
+function sheetStore(value) {
+  if (typeof value !== 'string') return value;
+  if (value.startsWith("'")) return value.slice(1);
+  if (value.startsWith('=')) return { formula: value };
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return new Date(value + 'T00:00:00Z');
+  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
+  return value;
+}
+
+class FakeRange {
+  constructor(sheet, row, col, numRows, numCols) {
+    Object.assign(this, { sheet, row, col, numRows, numCols });
+  }
+  getValues() {
+    const out = [];
+    for (let r = 0; r < this.numRows; r++) {
+      const src = this.sheet.rows[this.row - 1 + r] || [];
+      const line = [];
+      for (let c = 0; c < this.numCols; c++) {
+        const v = src[this.col - 1 + c];
+        line.push(v === undefined ? '' : v);
+      }
+      out.push(line);
+    }
+    return out;
+  }
+  setValues(values) {
+    if (values.length !== this.numRows || values.some((v) => v.length !== this.numCols)) {
+      throw new Error('setValues: data size does not match the range');
+    }
+    values.forEach((line, r) => {
+      const idx = this.row - 1 + r;
+      while (this.sheet.rows.length <= idx) this.sheet.rows.push([]);
+      line.forEach((v, c) => {
+        this.sheet.rows[idx][this.col - 1 + c] = sheetStore(v);
+      });
+    });
+    return this;
+  }
+  setFontWeight() {
+    return this;
+  }
+}
+
+class FakeSheet {
+  constructor(name) {
+    this.name = name;
+    this.rows = [];
+    this.frozen = 0;
+  }
+  getName() {
+    return this.name;
+  }
+  getLastRow() {
+    return this.rows.length;
+  }
+  getLastColumn() {
+    return this.rows.reduce((m, r) => Math.max(m, r.length), 0);
+  }
+  getRange(row, col, numRows = 1, numCols = 1) {
+    return new FakeRange(this, row, col, numRows, numCols);
+  }
+  getDataRange() {
+    return new FakeRange(this, 1, 1, Math.max(1, this.getLastRow()), Math.max(1, this.getLastColumn()));
+  }
+  appendRow(values) {
+    this.rows.push(Array.from(values, sheetStore));
+    return this;
+  }
+  deleteRow(row) {
+    if (row < 1 || row > this.rows.length) throw new Error('deleteRow: row out of range');
+    this.rows.splice(row - 1, 1);
+  }
+  setFrozenRows(n) {
+    this.frozen = n;
+  }
+}
+
+// `now` is a fake clock. Code.gs sees it through `new Date()`.
+function makeEnv(opts = {}) {
+  const env = {
+    now: Date.parse(opts.now || '2026-09-30T15:00:00Z'),
+    props: Object.assign(
+      { KEY_A, KEY_B, NAME_A: 'Sam', NAME_B: 'Alex', TIMEZONE: 'America/New_York', SITE_URL: 'https://example.test/two-of-us/' },
+      opts.props
+    ),
+    sheets: {},
+    logs: [],
+    lock: { held: false, waits: 0, releases: 0, busy: false },
+    webAppUrl: opts.webAppUrl === undefined ? FAKE_WEB_APP : opts.webAppUrl,
+  };
+  for (const k of Object.keys(env.props)) if (env.props[k] == null) delete env.props[k];
+
+  const spreadsheet = {
+    getSheetByName: (name) => env.sheets[name] || null,
+    insertSheet: (name) => (env.sheets[name] = new FakeSheet(name)),
+  };
+  const scriptProps = {
+    getProperty: (k) => (Object.prototype.hasOwnProperty.call(env.props, k) ? env.props[k] : null),
+    getProperties: () => Object.assign({}, env.props),
+    setProperty(k, v) {
+      env.props[k] = String(v);
+      return scriptProps;
+    },
+    deleteProperty(k) {
+      delete env.props[k];
+      return scriptProps;
+    },
+  };
+
+  class FakeDate extends Date {
+    constructor(...args) {
+      if (args.length === 0) super(env.now);
+      else super(...args);
+    }
+    static now() {
+      return env.now;
+    }
+  }
+
+  env.globals = {
+    SpreadsheetApp: { getActiveSpreadsheet: () => spreadsheet, flush() {} },
+    PropertiesService: { getScriptProperties: () => scriptProps },
+    LockService: {
+      getScriptLock: () => ({
+        waitLock() {
+          if (env.lock.busy) throw new Error('Lock timeout');
+          env.lock.held = true;
+          env.lock.waits++;
+        },
+        releaseLock() {
+          env.lock.held = false;
+          env.lock.releases++;
+        },
+      }),
+    },
+    Utilities: {
+      formatDate(date, tz, format) {
+        if (format !== 'yyyy-MM-dd') throw new Error('Fake formatDate only knows yyyy-MM-dd, got ' + format);
+        const parts = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
+        const get = (type) => parts.find((p) => p.type === type).value;
+        return `${get('year')}-${get('month')}-${get('day')}`;
+      },
+      getUuid: () => crypto.randomUUID(),
+    },
+    ContentService: {
+      MimeType: { JSON: 'application/json', TEXT: 'text/plain' },
+      createTextOutput: (text) => ({
+        text,
+        mime: null,
+        setMimeType(m) {
+          this.mime = m;
+          return this;
+        },
+        getContent() {
+          return this.text;
+        },
+      }),
+    },
+    Logger: { log: (msg) => env.logs.push(String(msg)) },
+    ScriptApp: {
+      getService: () => ({ getUrl: () => env.webAppUrl }),
+    },
+    Date: FakeDate,
+  };
+  env.sheet = (name) => env.sheets[name];
+  return env;
+}
+
+// Loads Code.gs into a fresh sandbox. Returns its functions plus API helpers.
+function loadBackend(opts = {}) {
+  const env = makeEnv(opts);
+  const ctx = vm.createContext(Object.assign({}, env.globals));
+  vm.runInContext(read('apps-script/Code.gs'), ctx, { filename: 'Code.gs' });
+  const unwrap = (out) => {
+    assert.strictEqual(out.mime, 'application/json');
+    return JSON.parse(out.getContent());
+  };
+  const b = {
+    env,
+    ctx,
+    get: (key, action, params = {}) => unwrap(ctx.doGet({ parameter: Object.assign({ action, key }, params) })),
+    post: (key, action, params = {}) =>
+      unwrap(ctx.doPost({ postData: { type: 'text/plain', contents: JSON.stringify(Object.assign({ action, key }, params)) } })),
+    rows: (name) => env.sheet(name).rows.slice(1),
+  };
+  if (opts.setup !== false) {
+    ctx.setup();
+    env.logs.length = 0;
+  }
+  return b;
+}
+
+function ymd(offsetDays, from = '2026-09-30') {
+  const d = new Date(from + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + offsetDays);
+  return d.toISOString().slice(0, 10);
+}
+
+// ---------------------------------------------------------------------------
+// Back end: setup, keys, links
+// ---------------------------------------------------------------------------
+
+test('setup adds the Moods and Jar tabs with headers', () => {
+  const b = loadBackend();
+  assert.deepStrictEqual(b.env.sheet('Moods').rows[0], ['date', 'person', 'mood', 'note', 'updatedAt']);
+  assert.deepStrictEqual(b.env.sheet('Jar').rows[0], ['id', 'date', 'person', 'text', 'forPartner', 'createdAt', 'updatedAt']);
+  assert.strictEqual(b.env.sheet('Moods').frozen, 1);
+});
+
+test('setup makes two different keys when missing and logs both links', () => {
+  const b = loadBackend({ props: { KEY_A: null, KEY_B: null }, setup: false });
+  b.ctx.setup();
+  const { KEY_A: a, KEY_B: bKey } = b.env.props;
+  assert.match(a, /^[A-Za-z0-9]{32,}$/);
+  assert.match(bKey, /^[A-Za-z0-9]{32,}$/);
+  assert.notStrictEqual(a, bKey);
+  const log = b.env.logs.join('\n');
+  assert.ok(log.includes('Personal link for Sam'));
+  assert.ok(log.includes('Personal link for Alex'));
+  const links = log.match(/https:\/\/example\.test\/two-of-us\/#setup=\S+/g);
+  assert.strictEqual(links.length, 2);
+  const decoded = decodeURIComponent(links[0].split('#setup=')[1]);
+  assert.strictEqual(decoded, FAKE_WEB_APP + '|' + a);
+  assert.strictEqual(b.env.props.TIMEZONE, 'America/New_York');
+});
+
+test('setup is safe to run twice (keeps keys and data)', () => {
+  const b = loadBackend();
+  b.post(KEY_A, 'setMood', { mood: 'good' });
+  b.ctx.setup();
+  assert.strictEqual(b.env.props.KEY_A, KEY_A);
+  assert.strictEqual(b.env.props.KEY_B, KEY_B);
+  assert.strictEqual(b.rows('Moods').length, 1);
+  assert.strictEqual(b.env.sheet('Moods').rows[0][0], 'date');
+});
+
+test('getLinks explains what to do when SITE_URL or the web app address is missing', () => {
+  const noSite = loadBackend({ props: { SITE_URL: null } });
+  noSite.ctx.getLinks();
+  assert.match(noSite.env.logs.join('\n'), /SITE_URL/);
+  assert.doesNotMatch(noSite.env.logs.join('\n'), /#setup=/);
+
+  const noUrl = loadBackend({ webAppUrl: null });
+  noUrl.ctx.getLinks();
+  assert.match(noUrl.env.logs.join('\n'), /WEB_APP_URL/);
+
+  const override = loadBackend({ webAppUrl: null, props: { WEB_APP_URL: 'https://script.google.com/macros/s/OTHER/exec' } });
+  override.ctx.getLinks();
+  assert.match(override.env.logs.join('\n'), /#setup=https%3A%2F%2Fscript\.google\.com%2Fmacros%2Fs%2FOTHER%2Fexec%7C/);
+});
+
+test('resetKeys makes new keys and old links stop working', () => {
+  const b = loadBackend();
+  b.ctx.resetKeys();
+  assert.notStrictEqual(b.env.props.KEY_A, KEY_A);
+  assert.notStrictEqual(b.env.props.KEY_B, KEY_B);
+  assert.deepStrictEqual(b.get(KEY_A, 'state'), { error: 'unauthorized' });
+  assert.strictEqual(b.get(b.env.props.KEY_A, 'state').names.me, 'Sam');
+  assert.match(b.env.logs.join('\n'), /#setup=/);
+});
+
+// ---------------------------------------------------------------------------
+// Back end: keys and requests
+// ---------------------------------------------------------------------------
+
+test('unknown, missing or empty key is rejected with no data', () => {
+  const b = loadBackend({ props: { KEY_B: null } });
+  for (const key of ['nope', 'wrong'.padEnd(40, 'z'), '', undefined, KEY_A.toUpperCase()]) {
+    assert.deepStrictEqual(b.get(key, 'state'), { error: 'unauthorized' });
+    assert.deepStrictEqual(b.post(key, 'setMood', { mood: 'good' }), { error: 'unauthorized' });
+  }
+  assert.strictEqual(b.rows('Moods').length, 0);
+});
+
+test('each key maps to the right person', () => {
+  const b = loadBackend();
+  const a = b.get(KEY_A, 'state');
+  const bb = b.get(KEY_B, 'state');
+  assert.deepStrictEqual(a.names, { me: 'Sam', partner: 'Alex' });
+  assert.deepStrictEqual(bb.names, { me: 'Alex', partner: 'Sam' });
+  b.post(KEY_A, 'setMood', { mood: 'great' });
+  assert.strictEqual(b.rows('Moods')[0][1], 'A');
+  assert.strictEqual(b.get(KEY_B, 'state').moods.partner.mood, 'great');
+  assert.strictEqual(b.get(KEY_B, 'state').moods.me, null);
+});
+
+test('bad requests are rejected', () => {
+  const b = loadBackend();
+  assert.strictEqual(b.get(KEY_A, 'nope').error, 'bad_request');
+  assert.strictEqual(b.get(KEY_A, 'setMood', { mood: 'good' }).error, 'bad_request'); // writes need POST
+  assert.strictEqual(b.post(KEY_A, 'state').error, 'bad_request');
+  assert.strictEqual(b.post(KEY_A, 'toString').error, 'bad_request');
+  const raw = JSON.parse(b.ctx.doPost({ postData: { contents: 'not json' } }).getContent());
+  assert.strictEqual(raw.error, 'bad_request');
+  assert.strictEqual(JSON.parse(b.ctx.doGet(undefined).getContent()).error, 'unauthorized');
+});
+
+// ---------------------------------------------------------------------------
+// Back end: moods
+// ---------------------------------------------------------------------------
+
+test('mood: one per person per day, a new tap replaces it', () => {
+  const b = loadBackend();
+  b.post(KEY_A, 'setMood', { mood: 'great' });
+  const s = b.post(KEY_A, 'setMood', { mood: 'okay' });
+  assert.strictEqual(s.ok, true);
+  assert.strictEqual(s.moods.me.mood, 'okay');
+  const rows = b.rows('Moods');
+  assert.strictEqual(rows.length, 1);
+  assert.deepStrictEqual(rows[0].slice(0, 3), ['2026-09-30', 'A', 'okay']);
+  b.post(KEY_B, 'setMood', { mood: 'rough' });
+  assert.strictEqual(b.rows('Moods').length, 2);
+});
+
+test('mood: invalid value rejected, nothing saved', () => {
+  const b = loadBackend();
+  for (const mood of ['meh', '', 'GREAT', undefined, 'great ']) {
+    assert.strictEqual(b.post(KEY_A, 'setMood', { mood }).error, 'bad_request');
+  }
+  assert.strictEqual(b.rows('Moods').length, 0);
+});
+
+test('mood note: trimmed, max 140, kept when left out, replaced when sent', () => {
+  const b = loadBackend();
+  assert.strictEqual(b.post(KEY_A, 'setMood', { mood: 'good', note: '  ' + 'x'.repeat(141) + '  ' }).error, 'too_long');
+  assert.strictEqual(b.rows('Moods').length, 0);
+  const s = b.post(KEY_A, 'setMood', { mood: 'good', note: '  ' + 'n'.repeat(140) + '  ' });
+  assert.strictEqual(s.moods.me.note, 'n'.repeat(140));
+  assert.strictEqual(b.post(KEY_A, 'setMood', { mood: 'okay' }).moods.me.note, 'n'.repeat(140));
+  assert.strictEqual(b.post(KEY_A, 'setMood', { mood: 'okay', note: 'Line one\nline two' }).moods.me.note, 'Line one line two');
+  assert.strictEqual(b.post(KEY_A, 'setMood', { mood: 'okay', note: '' }).moods.me.note, '');
+});
+
+test('text is stored as plain text (never a date or a formula)', () => {
+  const b = loadBackend();
+  const s = b.post(KEY_A, 'setMood', { mood: 'good', note: '=IMPORTXML("x")' });
+  assert.strictEqual(s.moods.me.note, '=IMPORTXML("x")');
+  b.post(KEY_B, 'setMood', { mood: 'good', note: '2026-01-02' });
+  assert.strictEqual(b.get(KEY_B, 'state').moods.me.note, '2026-01-02');
+  assert.strictEqual(typeof b.rows('Moods')[0][0], 'string');
+});
+
+test('mood: clear removes only your own mood for today', () => {
+  const b = loadBackend();
+  b.post(KEY_A, 'setMood', { mood: 'good' });
+  b.post(KEY_B, 'setMood', { mood: 'okay' });
+  const s = b.post(KEY_A, 'clearMood');
+  assert.strictEqual(s.moods.me, null);
+  assert.strictEqual(s.moods.partner.mood, 'okay');
+  assert.deepStrictEqual(b.rows('Moods').map((r) => r[1]), ['B']);
+});
+
+test('mood: the server decides the date in TIMEZONE (day boundary)', () => {
+  // 03:30 UTC on 10 March is still 23:30 on 9 March in New York.
+  const b = loadBackend({ now: '2026-03-10T03:30:00Z' });
+  let s = b.post(KEY_A, 'setMood', { mood: 'good', date: '2020-01-01' }); // a date from the phone is ignored
+  assert.strictEqual(s.today, '2026-03-09');
+  b.env.now = Date.parse('2026-03-10T04:30:00Z'); // 00:30 in New York: a new day
+  s = b.post(KEY_A, 'setMood', { mood: 'rough' });
+  assert.strictEqual(s.today, '2026-03-10');
+  assert.deepStrictEqual(b.rows('Moods').map((r) => [r[0], r[2]]), [['2026-03-09', 'good'], ['2026-03-10', 'rough']]);
+  assert.strictEqual(s.days[5].me.mood, 'good');
+
+  const tokyo = loadBackend({ now: '2026-03-10T03:30:00Z', props: { TIMEZONE: 'Asia/Tokyo' } });
+  assert.strictEqual(tokyo.get(KEY_A, 'state').today, '2026-03-10');
+});
+
+test('state returns the right 7-day window, oldest first', () => {
+  const b = loadBackend();
+  const moods = b.env.sheet('Moods');
+  for (const off of [-8, -7, -6, -3, 0, 1]) moods.rows.push([ymd(off), 'A', 'good', 'day ' + off, new Date()]);
+  moods.rows.push([ymd(-2), 'B', 'rough', '', new Date()]);
+  moods.rows.push([new Date(ymd(-1) + 'T12:00:00Z'), 'B', 'great', 'typed by hand', new Date()]); // a real date cell
+  moods.rows.push([ymd(-5), 'B', 'unknown-mood', '', new Date()]);
+
+  const s = b.get(KEY_A, 'state');
+  assert.strictEqual(s.today, '2026-09-30');
+  assert.deepStrictEqual(s.days.map((d) => d.date), [-6, -5, -4, -3, -2, -1, 0].map((o) => ymd(o)));
+  assert.deepStrictEqual(s.days.map((d) => d.me && d.me.note), ['day -6', null, null, 'day -3', null, null, 'day 0']);
+  assert.deepStrictEqual(s.days.map((d) => d.partner && d.partner.mood), [null, null, null, null, 'rough', 'great', null]);
+  assert.deepStrictEqual(s.moods.me, { mood: 'good', note: 'day 0' });
+  assert.strictEqual(s.version, vm.runInContext('VERSION', b.ctx));
+  assert.strictEqual(s.jarCount, 0);
+});
+
+test('writes hold the lock, and a busy lock saves nothing', () => {
+  const b = loadBackend();
+  b.post(KEY_A, 'setMood', { mood: 'good' });
+  b.post(KEY_A, 'clearMood');
+  assert.strictEqual(b.env.lock.waits, 2);
+  assert.strictEqual(b.env.lock.releases, 2);
+  assert.strictEqual(b.env.lock.held, false);
+  b.env.lock.busy = true;
+  assert.strictEqual(b.post(KEY_A, 'setMood', { mood: 'good' }).error, 'busy');
+  assert.strictEqual(b.rows('Moods').length, 0);
+});
+
+test('requests never write moods or notes to the log', () => {
+  const b = loadBackend();
+  b.post(KEY_A, 'setMood', { mood: 'rough', note: 'private words' });
+  b.get(KEY_B, 'state');
+  b.post(KEY_A, 'clearMood');
+  assert.deepStrictEqual(b.env.logs, []);
+});
+
+// ---------------------------------------------------------------------------
+// Back end: least privilege
+// ---------------------------------------------------------------------------
+
+test('appsscript.json: V8, only the current-Sheet scope, web app runs as owner for anyone', () => {
+  const m = JSON.parse(read('apps-script/appsscript.json'));
+  assert.strictEqual(m.runtimeVersion, 'V8');
+  assert.deepStrictEqual(m.oauthScopes, ['https://www.googleapis.com/auth/spreadsheets.currentonly']);
+  assert.deepStrictEqual(m.webapp, { executeAs: 'USER_DEPLOYING', access: 'ANYONE_ANONYMOUS' });
+});
+
+test('Code.gs only touches its own Sheet (no openById, Drive, Gmail, Calendar, UrlFetch)', () => {
+  const code = read('apps-script/Code.gs');
+  for (const banned of ['openById', 'openByUrl', 'DriveApp', 'GmailApp', 'MailApp', 'CalendarApp', 'UrlFetchApp', 'DocumentApp']) {
+    assert.ok(!code.includes(banned), 'Code.gs uses ' + banned);
+  }
+});
+
+test('only setup, getLinks, resetKeys, doGet and doPost are public', () => {
+  const code = read('apps-script/Code.gs');
+  const names = [...code.matchAll(/^function\s+([A-Za-z0-9_$]+)/gm)].map((m) => m[1]);
+  const pub = names.filter((n) => !n.endsWith('_')).sort();
+  assert.deepStrictEqual(pub, ['doGet', 'doPost', 'getLinks', 'resetKeys', 'setup']);
+});
+
+// ---------------------------------------------------------------------------
 
 async function main() {
   let passed = 0;
@@ -103,3 +547,5 @@ async function main() {
 }
 
 if (require.main === module) main();
+
+module.exports = { makeEnv, loadBackend, KEY_A, KEY_B };
