@@ -180,7 +180,31 @@
       return { ok: true, jarCount: db.jar.length };
     }
 
+    function exportAll() {
+      const withName = function (r) {
+        return Object.assign({ name: NAMES[r.person] }, r);
+      };
+      const byDate = function (a, b) {
+        return a.date < b.date ? -1 : a.date > b.date ? 1 : 0;
+      };
+      return {
+        ok: true,
+        app: 'Two of Us',
+        version: VERSION,
+        exportedOn: today,
+        timezone: 'America/New_York',
+        people: { A: NAMES.A, B: NAMES.B },
+        moods: db.moods.slice().sort(byDate).map(function (r) {
+          return withName({ date: r.date, person: r.person, mood: r.mood, note: r.note });
+        }),
+        jar: db.jar.slice().sort(byDate).map(function (n) {
+          return withName({ id: n.id, date: n.date, person: n.person, text: n.text, forPartner: n.forPartner });
+        }),
+      };
+    }
+
     const actions = {
+      export: exportAll,
       state: state,
       setMood: setMood,
       clearMood: clearMood,

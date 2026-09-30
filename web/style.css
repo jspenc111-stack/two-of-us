@@ -812,3 +812,83 @@ body:has(textarea:focus, input[type="text"]:focus) .tabbar {
   border-radius: var(--radius-sm);
   padding: 10px 14px;
 }
+
+.icon-btn-end {
+  margin-left: 0;
+  margin-right: -12px;
+}
+
+/* ---------- Banners (offline, helper out of date) ---------- */
+
+.banner {
+  margin: 0 0 14px;
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+}
+
+.banner-info {
+  background: var(--okay);
+}
+
+.banner-title {
+  font-weight: 700;
+}
+
+.banner-sub {
+  color: var(--text);
+  font-size: 0.92rem;
+}
+
+.banner .row {
+  margin-top: 4px;
+}
+
+.btn-small {
+  min-height: 48px;
+  padding: 8px 16px;
+  background: var(--surface);
+}
+
+/* Last loaded data, shown greyed out while the back end can't be reached. */
+main.is-stale .view > *,
+main.is-stale .note-card {
+  opacity: 0.55;
+  filter: grayscale(0.6);
+}
+
+/* ---------- Settings ---------- */
+
+.facts {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0 10px;
+}
+
+.facts div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.facts dt {
+  color: var(--muted);
+}
+
+.facts dd {
+  margin: 0;
+  font-weight: 700;
+}
+
+.card-btn {
+  margin-top: 14px;
+}
+
+.version {
+  margin: 18px 4px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  text-align: center;
+}

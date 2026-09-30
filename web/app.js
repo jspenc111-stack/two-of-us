@@ -37,7 +37,13 @@
   };
 
   // Screens. Tabs sit at the bottom; the others open on top and close with Back.
-  const VIEWS = { today: 'view-today', jar: 'view-jar', 'jar-all': 'view-jar-all', 'jar-form': 'view-jar-form' };
+  const VIEWS = {
+    today: 'view-today',
+    jar: 'view-jar',
+    'jar-all': 'view-jar-all',
+    'jar-form': 'view-jar-form',
+    settings: 'view-settings',
+  };
 
   // Everything the app knows lives here, in memory only.
   const app = {
@@ -49,6 +55,7 @@
     pendingWrites: 0,
     noteEditor: { open: false, text: '' },
     blocked: false, // showing a message instead of the app
+    offline: false, // the last request couldn't reach the back end
     tab: 'today',
     sub: null, // a screen opened on top of a tab
     jar: null, // jar notes, newest first
@@ -242,6 +249,7 @@
       clearTimeout(timer);
     }
     if (!res || typeof res !== 'object') throw new ApiError('network', 'Unexpected reply');
+    if (app.offline && res.error !== 'server' && res.error !== 'busy') setOffline(false);
     if (res.error) throw new ApiError(res.error, res.message);
     return res;
   }
@@ -274,6 +282,7 @@
   function applyState(s) {
     app.data = s;
     app.loadedAt = Date.now();
+    $('banner-outdated').hidden = s.version >= EXPECTED_BACKEND_VERSION;
     renderToday();
     if (app.jar && app.jar.length !== s.jarCount) {
       app.jarLoadedAt = 0; // the other person changed the jar
@@ -286,11 +295,37 @@
     return COPY[err && err.code] || COPY.offline;
   }
 
+  // Problems with what was typed get a short message. Anything else means the
+  // back end couldn't be reached: show the banner and grey out the last data.
   function handleError(err) {
     const code = err && err.code;
     if (code === 'unauthorized') return showMessage('badkey');
     if (code === 'forbidden' || code === 'not_found') loadJar(true);
-    toast(errorText(err));
+    if (Object.prototype.hasOwnProperty.call(COPY, code)) return toast(COPY[code]);
+    setOffline(true);
+  }
+
+  function friendlyDate(ms) {
+    const d = new Date(ms);
+    const today = new Date();
+    const yesterday = new Date();
+    yesterday.setDate(today.getDate() - 1);
+    if (d.toDateString() === today.toDateString()) return 'today';
+    if (d.toDateString() === yesterday.toDateString()) return 'yesterday';
+    return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+  }
+
+  function setOffline(on) {
+    app.offline = on;
+    $('banner-offline').hidden = !on;
+    $('main').classList.toggle('is-stale', on && !!app.data);
+    $('last-updated').textContent = on && app.loadedAt ? 'Last updated ' + friendlyDate(app.loadedAt) : '';
+    if (!app.data && currentView() === 'today') renderToday();
+  }
+
+  function retry() {
+    refresh();
+    if (currentView() === 'jar' || currentView() === 'jar-all') loadJar(true);
   }
 
   // -------------------------------------------------------------------------
@@ -301,8 +336,9 @@
     const view = $('view-today');
     const d = app.data;
     if (!d) {
-      view.setAttribute('aria-busy', 'true');
-      fill(view, todaySkeleton());
+      // Nothing loaded yet: placeholders while loading, or just the banner when offline.
+      view.setAttribute('aria-busy', String(!app.offline));
+      fill(view, app.offline ? null : todaySkeleton());
       return;
     }
     view.removeAttribute('aria-busy');
@@ -717,6 +753,7 @@
         toast(errorText(err));
         return closeSub();
       }
+      if (!Object.prototype.hasOwnProperty.call(COPY, err.code)) setOffline(true);
       app.formError = errorText(err); // the typed text stays in the form
       renderJarForm();
     }
@@ -737,6 +774,75 @@
   }
 
   // -------------------------------------------------------------------------
+  // Settings
+  // -------------------------------------------------------------------------
+
+  function renderSettings() {
+    const who = names();
+    fill($('view-settings'),
+      h('section', { class: 'card' },
+        h('h2', { class: 'card-title' }, 'People'),
+        h('dl', { class: 'facts' },
+          h('div', null, h('dt', null, 'You'), h('dd', null, who.me)),
+          h('div', null, h('dt', null, 'Partner'), h('dd', null, who.partner))
+        ),
+        h('p', { class: 'hint' }, 'Names are set in the helper script (Apps Script), not here.')
+      ),
+      h('section', { class: 'card' },
+        h('h2', { class: 'card-title' }, 'Your data'),
+        h('p', { class: 'card-sub' }, 'Download all moods and jar notes as a .json file, as a personal backup.'),
+        h('button', { type: 'button', class: 'btn btn-block card-btn', id: 'export-btn', onclick: exportAll }, 'Export everything')
+      ),
+      h('section', { class: 'card' },
+        h('h2', { class: 'card-title' }, 'This phone'),
+        h('p', { class: 'card-sub' }, 'Your personal link works like a password. Keep a screen lock on your phone.'),
+        h('button', { type: 'button', class: 'btn btn-block card-btn', onclick: forgetPhone }, 'Forget this phone')
+      ),
+      h('p', { class: 'version' },
+        'App version ' + APP_VERSION + ' · Helper version ' + (app.data ? app.data.version : '…'))
+    );
+  }
+
+  // Asks the back end for everything and hands it to the phone as a file download.
+  async function exportAll() {
+    const btn = $('export-btn');
+    btn.disabled = true;
+    btn.textContent = 'Preparing…';
+    try {
+      const res = await api('export');
+      delete res.ok;
+      const blob = new Blob([JSON.stringify(res, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = h('a', { href: url, download: 'two-of-us-backup-' + res.exportedOn + '.json', hidden: true });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      toast('Backup downloaded');
+    } catch (err) {
+      handleError(err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Export everything';
+    }
+  }
+
+  async function forgetPhone() {
+    const ok = await confirmSheet('Forget this phone?', 'Forget', "You'll need your personal setup link to use the app here again.");
+    if (!ok) return;
+    if (!app.demo) {
+      try {
+        localStorage.removeItem(STORE_KEY);
+      } catch (err) {
+        // Nothing saved, nothing to remove.
+      }
+    }
+    Object.assign(app, { link: null, data: null, jar: null, draft: null, pulledId: null, sub: null });
+    app.noteEditor = { open: false, text: '' };
+    showMessage('setup');
+  }
+
+  // -------------------------------------------------------------------------
   // Moving between screens
   // -------------------------------------------------------------------------
 
@@ -751,7 +857,9 @@
     $('view-message').hidden = true;
     $('tabbar').hidden = !!app.sub;
     $('back-btn').hidden = !app.sub;
+    $('settings-btn').hidden = !!app.sub;
     let title = 'Two of Us';
+    if (view === 'settings') title = 'Settings';
     if (view === 'jar-all') title = 'All notes';
     if (view === 'jar-form') title = app.draft && app.draft.id ? 'Edit note' : 'Add to the jar';
     $('title').textContent = title;
@@ -763,6 +871,7 @@
     if (view === 'jar') renderJar();
     if (view === 'jar-all') renderJarAll();
     if (view === 'jar-form') renderJarForm();
+    if (view === 'settings') renderSettings();
   }
 
   function setTab(tab) {
@@ -796,12 +905,19 @@
     });
     $('tabbar').hidden = true;
     $('back-btn').hidden = true;
+    $('settings-btn').hidden = true;
+    $('banner-offline').hidden = true;
+    $('banner-outdated').hidden = true;
+    $('main').classList.remove('is-stale');
     $('title').textContent = 'Two of Us';
     const view = $('view-message');
     const kids = [jarArt(kind === 'setup' ? 3 : 0), h('p', { class: 'message-text' }, COPY[kind])];
     if (kind === 'setup') {
       kids.push(h('p', { class: 'message-sub' }, 'Each of you has your own link. It comes from the person who set up the app.'));
       if (!app.demo) kids.push(h('a', { class: 'link', href: '?demo' }, 'Preview with made-up data'));
+    }
+    if (kind === 'badkey' && (app.link || app.demo)) {
+      kids.push(h('button', { type: 'button', class: 'btn', onclick: forgetPhone }, 'Forget this phone'));
     }
     fill(view, ...kids);
     view.hidden = false;
@@ -812,6 +928,8 @@
     if (history.state && history.state.sub) history.replaceState(null, '');
     document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => setTab(tab.dataset.tab)));
     $('back-btn').addEventListener('click', closeSub);
+    $('settings-btn').addEventListener('click', () => openSub('settings'));
+    $('retry-btn').addEventListener('click', retry);
     window.addEventListener('popstate', (e) => {
       const sub = e.state && e.state.sub;
       app.sub = VIEWS[sub] ? sub : null;
@@ -846,6 +964,9 @@
 
     showApp();
     refresh();
+
+    // Makes the app open fast and installable. It stores app files only, never data (see sw.js).
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible' && Date.now() - app.loadedAt > REFRESH_AFTER_MS) refresh();

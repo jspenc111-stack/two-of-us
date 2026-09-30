@@ -95,6 +95,7 @@ function respond_(method, req) {
     const routes = method === 'GET' ? {
       state: state_,
       jarList: jarList_,
+      export: export_,
     } : {
       setMood: setMood_,
       clearMood: clearMood_,
@@ -470,4 +471,36 @@ function jarDelete_(person, req, cfg) {
     sheet.deleteRow(ownJarRow_(sheet, person, req.id, cfg.tz).row);
   });
   return { ok: true, jarCount: jarCount_() };
+}
+
+// ---------------------------------------------------------------------------
+// Export: a personal backup of everything (dates only, no times).
+// ---------------------------------------------------------------------------
+
+function export_(person, req, cfg) {
+  const byDate = function (a, b) {
+    return a.date < b.date ? -1 : a.date > b.date ? 1 : a.row - b.row;
+  };
+  const moods = readRows_(sheet_('Moods'), cfg.tz)
+    .filter(function (r) { return MOODS.indexOf(str_(r.mood)) !== -1; })
+    .sort(byDate)
+    .map(function (r) {
+      return { date: r.date, person: r.person, name: cfg.names[r.person] || '', mood: str_(r.mood), note: str_(r.note) };
+    });
+  const jar = readRows_(sheet_('Jar'), cfg.tz)
+    .filter(function (r) { return str_(r.id) !== ''; })
+    .sort(byDate)
+    .map(function (r) {
+      return { id: str_(r.id), date: r.date, person: r.person, name: cfg.names[r.person] || '', text: str_(r.text), forPartner: isTrue_(r.forPartner) };
+    });
+  return {
+    ok: true,
+    app: 'Two of Us',
+    version: VERSION,
+    exportedOn: today_(cfg.tz),
+    timezone: cfg.tz,
+    people: { A: cfg.names.A, B: cfg.names.B },
+    moods: moods,
+    jar: jar,
+  };
 }

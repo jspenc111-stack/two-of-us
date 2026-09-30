@@ -11,6 +11,9 @@
   <meta name="theme-color" content="#1d1816" media="(prefers-color-scheme: dark)">
   <meta name="description" content="A private mood check-in and gratitude jar for two.">
   <title>Two of Us</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png" sizes="192x192" type="image/png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="stylesheet" href="style.css">
   <script src="demo.js" defer></script>
   <script src="app.js" defer></script>
@@ -22,13 +25,28 @@
     </button>
     <h1 class="app-title" id="title">Two of Us</h1>
     <span class="pill" id="demo-pill" hidden>Demo</span>
+    <button type="button" class="icon-btn icon-btn-end" id="settings-btn" aria-label="Settings" hidden>
+      <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" focusable="false"><path d="M10.3 2.8h3.4l.5 2.6 1.6.9 2.5-.9 1.7 2.9-2 1.7v1.9l2 1.7-1.7 2.9-2.5-.9-1.6.9-.5 2.6h-3.4l-.5-2.6-1.6-.9-2.5.9-1.7-2.9 2-1.7v-1.9l-2-1.7 1.7-2.9 2.5.9 1.6-.9z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.9"/></svg>
+    </button>
   </header>
 
   <main id="main">
+    <div class="banner banner-info" id="banner-outdated" hidden>
+      <p class="banner-title">The helper script needs updating</p>
+      <p class="banner-sub">Ask the person who set up the app to paste the new Code.gs into Apps Script.</p>
+    </div>
+    <div class="banner" id="banner-offline" role="alert" hidden>
+      <p class="banner-title">Can't reach the jar right now. Try again in a moment.</p>
+      <div class="row between">
+        <p class="banner-sub" id="last-updated"></p>
+        <button type="button" class="btn btn-small" id="retry-btn">Try again</button>
+      </div>
+    </div>
     <section id="view-today" class="view" aria-label="Today" hidden></section>
     <section id="view-jar" class="view" aria-label="Jar" hidden></section>
     <section id="view-jar-all" class="view" aria-label="All notes" hidden></section>
     <section id="view-jar-form" class="view" aria-label="Jar note" hidden></section>
+    <section id="view-settings" class="view" aria-label="Settings" hidden></section>
     <section id="view-message" class="view view-message" hidden></section>
   </main>
 

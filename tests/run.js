@@ -576,6 +576,30 @@ test('jar: edit and delete your own notes only (checked on the server)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Back end: export
+// ---------------------------------------------------------------------------
+
+test('export: everything from both people, dates only (no times)', () => {
+  const b = loadBackend();
+  b.post(KEY_A, 'setMood', { mood: 'good', note: 'a note' });
+  b.post(KEY_B, 'setMood', { mood: 'rough' });
+  b.post(KEY_B, 'jarAdd', { text: 'thanks', forPartner: true });
+  const ex = b.get(KEY_A, 'export');
+  assert.strictEqual(ex.ok, true);
+  assert.deepStrictEqual(ex.people, { A: 'Sam', B: 'Alex' });
+  assert.strictEqual(ex.exportedOn, '2026-09-30');
+  assert.deepStrictEqual(ex.moods, [
+    { date: '2026-09-30', person: 'A', name: 'Sam', mood: 'good', note: 'a note' },
+    { date: '2026-09-30', person: 'B', name: 'Alex', mood: 'rough', note: '' },
+  ]);
+  assert.deepStrictEqual(ex.jar.map((n) => [n.person, n.name, n.text, n.forPartner]), [['B', 'Alex', 'thanks', true]]);
+  assert.ok(!/T\d\d:\d\d/.test(JSON.stringify(ex)), 'no times in the export');
+  assert.deepStrictEqual(b.get('nope', 'export'), { error: 'unauthorized' });
+  assert.strictEqual(b.post(KEY_A, 'export').error, 'bad_request');
+  assert.deepStrictEqual(b.env.logs, []);
+});
+
+// ---------------------------------------------------------------------------
 // Back end: least privilege
 // ---------------------------------------------------------------------------
 
@@ -717,6 +741,97 @@ test('demo mode answers like the real back end (made-up names only)', async () =
   const partnerNote = (await demo.request('jarList')).notes.find((n) => !n.mine);
   assert.strictEqual((await demo.request('jarDelete', { id: partnerNote.id })).error, 'forbidden');
   assert.strictEqual((await demo.request('jarAdd', { text: 'x'.repeat(281) })).error, 'too_long');
+  const demoExport = await demo.request('export');
+  const realExport = real.get(KEY_A, 'export');
+  assert.deepStrictEqual(shape(demoExport), shape(realExport));
+});
+
+// ---------------------------------------------------------------------------
+// Installable app (PWA)
+// ---------------------------------------------------------------------------
+
+function pngSize(file) {
+  const buf = fs.readFileSync(path.join(ROOT, file));
+  assert.strictEqual(buf.toString('ascii', 1, 4), 'PNG', file + ' is not a PNG');
+  return [buf.readUInt32BE(16), buf.readUInt32BE(20)];
+}
+
+test('manifest: standalone, portrait, colours, 192/512 icons and a maskable icon', () => {
+  const m = JSON.parse(read('web/manifest.webmanifest'));
+  assert.strictEqual(m.name, 'Two of Us');
+  assert.strictEqual(m.short_name, 'Two of Us');
+  assert.strictEqual(m.display, 'standalone');
+  assert.strictEqual(m.orientation, 'portrait');
+  assert.strictEqual(m.start_url, './');
+  assert.match(m.theme_color, /^#[0-9a-f]{6}$/i);
+  assert.match(m.background_color, /^#[0-9a-f]{6}$/i);
+  for (const icon of m.icons) {
+    const [w, hgt] = pngSize('web/' + icon.src);
+    assert.strictEqual(`${w}x${hgt}`, icon.sizes, icon.src);
+  }
+  const sizes = (purpose) => m.icons.filter((i) => i.purpose === purpose).map((i) => i.sizes);
+  assert.deepStrictEqual(sizes('any'), ['192x192', '512x512']);
+  assert.ok(sizes('maskable').includes('512x512'));
+  assert.match(read('web/index.html'), /<link rel="manifest" href="manifest\.webmanifest">/);
+});
+
+test('service worker keeps app files only and never touches back end requests', async () => {
+  const listeners = {};
+  const stored = {};
+  const deleted = [];
+  class FakeRequest {
+    constructor(url, opts) {
+      this.url = url;
+      this.opts = opts;
+    }
+  }
+  const ctx = vm.createContext({
+    self: {
+      addEventListener: (type, fn) => (listeners[type] = fn),
+      location: { origin: 'https://example.test' },
+      skipWaiting() {},
+      clients: { claim() {} },
+    },
+    caches: {
+      open: async (name) => ({
+        addAll: async (reqs) => (stored[name] = reqs.map((r) => r.url)),
+        match: async () => undefined,
+      }),
+      keys: async () => ['two-of-us-v0', 'unrelated'].concat(Object.keys(stored)),
+      delete: async (name) => deleted.push(name),
+    },
+    Request: FakeRequest,
+    URL,
+    fetch: async () => 'network',
+  });
+  vm.runInContext(read('web/sw.js'), ctx, { filename: 'sw.js' });
+  const CACHE = vm.runInContext('CACHE', ctx);
+  assert.match(CACHE, /^two-of-us-v\d+$/);
+
+  let pending;
+  listeners.install({ waitUntil: (p) => (pending = p) });
+  await pending;
+  const cached = stored[CACHE].map((f) => (f === './' ? 'web/index.html' : 'web/' + f.slice(2)));
+  for (const f of cached) assert.ok(fs.existsSync(path.join(ROOT, f)), f + ' is listed in sw.js but missing');
+  const appFiles = repoFiles().filter((f) => f.startsWith('web/') && f !== 'web/sw.js');
+  assert.deepStrictEqual(appFiles.filter((f) => !cached.includes(f)), [], 'every app file is listed in sw.js');
+
+  listeners.activate({ waitUntil: (p) => (pending = p) });
+  await pending;
+  assert.deepStrictEqual(deleted, ['two-of-us-v0'], 'only old copies of this app are removed');
+
+  const handled = (url, method = 'GET', mode = 'cors') => {
+    let called = false;
+    listeners.fetch({ request: { url, method, mode }, respondWith: () => (called = true) });
+    return called;
+  };
+  assert.strictEqual(handled(FAKE_WEB_APP + '?action=state'), false);
+  assert.strictEqual(handled('https://script.googleusercontent.com/macros/echo?user_content_key=x'), false);
+  assert.strictEqual(handled(FAKE_WEB_APP, 'POST'), false);
+  assert.strictEqual(handled('https://example.test/two-of-us/', 'POST'), false);
+  assert.strictEqual(handled('https://example.test/two-of-us/app.js'), true);
+  assert.strictEqual(handled('https://example.test/two-of-us/?demo', 'GET', 'navigate'), true);
+  assert.ok(!/\.put\(/.test(read('web/sw.js')), 'sw.js must not store responses at run time');
 });
 
 // ---------------------------------------------------------------------------
