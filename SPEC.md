@@ -90,11 +90,13 @@ Stored as the value, shown as emoji + label. Colours must not be the only signal
 - Text box, max 280 characters, character counter.
 - Optional "for [partner name]" toggle (default off), which marks the note as being about the partner.
 - Saved with: author, date, text, `forPartner` flag.
+- If saving fails, the form stays open with the text kept. A half-written note is also kept if you leave the form.
 
 ### Browsing
 - **Jar tab** shows a simple jar illustration with a count ("42 notes").
 - **"Pull one out"** button: shows one random note in a card (author, date, text). Tap again for another.
 - **"See all"** list: newest first, grouped by month. Filter chips: Everyone / Mine / [Partner].
+- Notes marked "for partner" show a small tag: "for you" to the partner, "for [partner name]" to the author.
 - Both people see all jar notes. That's the point of the jar.
 
 ### Editing
@@ -105,11 +107,11 @@ Stored as the value, shown as emoji + label. Colours must not be the only signal
 
 ## 6. Screens and navigation
 
-Bottom tab bar with two tabs: **Today** and **Jar**. A small gear icon (top right) opens **Settings**.
+Bottom tab bar with two tabs: **Today** and **Jar**. A small gear icon (top right) opens **Settings**. "See all", the note form and Settings open on top with a back arrow; the phone's Back gesture closes them too.
 
 Settings shows:
 - Your name and partner's name (read-only, set in Apps Script).
-- "Export everything" → downloads a `.json` file of all moods and jar notes (*a plain text data file, a personal backup*).
+- "Export everything" → downloads a `.json` file of all moods and jar notes (*a plain text data file, a personal backup*). Dates only, no times.
 - "Forget this phone".
 - App version.
 
@@ -140,6 +142,7 @@ Person is stored as `A`/`B`, not names. Names live only in Script Properties.
 
 ### Script Properties
 `KEY_A`, `KEY_B`, `NAME_A`, `NAME_B`, `TIMEZONE`, `SITE_URL` (the GitHub Pages address, used to build setup links).
+Optional: `WEB_APP_URL`, only if `getLinks` says it can't find the web app address by itself.
 
 ### Public functions (runnable from the Apps Script editor)
 - `setup()`: adds the tabs (if missing), generates both keys, logs both setup links. Safe to run twice (doesn't wipe data).
@@ -160,6 +163,11 @@ Person is stored as `A`/`B`, not names. Names live only in Script Properties.
 | `export` | GET | Everything, as JSON |
 
 *API = the list of requests the app is allowed to make to the back end.*
+
+- Every reply is JSON. Success has `ok: true`. A problem has `error`: `unauthorized`, `bad_request`, `too_long`, `empty`, `forbidden` (not your note), `not_found`, `busy`, or `server`.
+- `setMood` and `clearMood` reply with the fresh `state`. `setMood` without `note` keeps today's note; with `note` (even empty) it replaces it.
+- `jarList` marks each note `mine: true/false` for the person asking. People are never sent as `A`/`B` to the app, only as "me" / "partner".
+- `export` includes names, but dates only (no times).
 
 ### Validation (server-side)
 - Unknown key → `{error: "unauthorized"}`, no data.
@@ -191,7 +199,8 @@ This is emotional data between two people. These rules are requirements, not sug
 ### On the phone
 - The app has no login screen. **Anyone who can unlock your phone can open it.** Keep a phone screen lock on.
 - Only the backend URL + key are saved on the phone. Moods and notes are held in memory while the app is open and are not written to phone storage.
-- The service worker (*the part that makes it load like an app*) caches **app files only**, never data.
+- The service worker (*the part that makes it load like an app*) caches **app files only**, never data. It only ever clears its own old copies.
+- All GitHub Pages sites of one GitHub account share one address (`<user>.github.io`), so another site published there could technically read the saved link. The README says so.
 - No notifications, so nothing appears on the lock screen.
 
 ### No tracking
@@ -225,6 +234,8 @@ This is emotional data between two people. These rules are requirements, not sug
 
 `?demo` in the URL runs the whole app with fake names ("Sam" and "Alex") and fake data in memory, with no backend. Used for previewing and for Claude Code to check layouts.
 
+Extra previews for checking every state: `?demo=empty`, `?demo=slow` (loading), `?demo=offline` (first load works, then every request fails), `?demo=badkey`, `?demo=outdated`, `?demo=setup`.
+
 ---
 
 ## 11. Tests
@@ -251,9 +262,9 @@ This is emotional data between two people. These rules are requirements, not sug
 ## 13. Owner setup steps (to go in README, in this order)
 
 1. **GitHub (via Claude Code):** merge the PRs; Pages deploys automatically.
-2. **GitHub website:** Repo → Settings → Pages → confirm it's live; note the site address.
+2. **GitHub website:** Repo → Settings → Pages → Source: **GitHub Actions** → confirm it's live; note the site address.
 3. **Google Sheets (on a computer):** create a blank Sheet named `Two of Us — data (private)` → Extensions → Apps Script → paste `Code.gs` and `appsscript.json` (Project Settings → show manifest file) → set Script Properties `NAME_A`, `NAME_B`, `TIMEZONE`, `SITE_URL` → run `setup` → approve permissions.
-4. **Apps Script:** Deploy → New deployment → Web app → Execute as **Me**, Who has access **Anyone** → Deploy. Run `getLinks` and copy the two links from the log.
+4. **Apps Script:** Deploy → New deployment → Web app → Execute as **Me**, Who has access **Anyone** → Deploy. Run `getLinks` and copy the two links from the log. (If it can't find the web app address, save the Web app URL as Script Property `WEB_APP_URL` and run it again.)
    *"Anyone" is needed so your partner doesn't need your Google login. The secret key is what actually protects the data.*
 5. **Each Pixel, in Chrome:** open your own link → tap ⋮ menu → Install app / Add to Home screen.
 

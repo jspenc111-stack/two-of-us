@@ -76,6 +76,13 @@ test('no screenshots or photos committed (only app icons)', () => {
   assert.deepStrictEqual(images, []);
 });
 
+test('README states the honest limitation and that this is not a crisis tool', () => {
+  const readme = read('README.md');
+  assert.match(readme, /owner can open that Sheet and see or change everything/);
+  assert.match(readme, /not a crisis or mental-health tool/);
+  for (const tool of ['GitHub website', 'Google Sheets', 'Apps Script', 'Chrome on each phone']) assert.ok(readme.includes(tool), tool);
+});
+
 test('Pages workflow publishes the web/ folder only from main', () => {
   const wf = read('.github/workflows/pages.yml');
   assert.match(wf, /path:\s*web\s*$/m);
