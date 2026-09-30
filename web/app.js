@@ -266,7 +266,7 @@
   }
 
   async function refresh() {
-    if (app.refreshing) return;
+    if (app.refreshing || app.blocked) return;
     app.refreshing = true;
     try {
       const s = await api('state');
@@ -316,6 +316,7 @@
   }
 
   function setOffline(on) {
+    if (app.blocked) return; // a message is showing instead of the app
     app.offline = on;
     $('banner-offline').hidden = !on;
     $('main').classList.toggle('is-stale', on && !!app.data);
