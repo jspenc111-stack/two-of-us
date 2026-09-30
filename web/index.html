@@ -2,11 +2,30 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <!-- Privacy: only files from this site, and data only to Google Apps Script. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://script.google.com https://*.googleusercontent.com; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#fbf6f0" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1d1816" media="(prefers-color-scheme: dark)">
+  <meta name="description" content="A private mood check-in and gratitude jar for two.">
   <title>Two of Us</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="demo.js" defer></script>
+  <script src="app.js" defer></script>
 </head>
 <body>
-  <p>Two of Us is on its way.</p>
+  <header class="topbar">
+    <h1 class="app-title" id="title">Two of Us</h1>
+    <span class="pill" id="demo-pill" hidden>Demo</span>
+  </header>
+
+  <main id="main">
+    <section id="view-today" class="view" aria-label="Today" hidden></section>
+    <section id="view-message" class="view view-message" hidden></section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
 </body>
 </html>

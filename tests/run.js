@@ -526,6 +526,115 @@ test('only setup, getLinks, resetKeys, doGet and doPost are public', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Front end
+// ---------------------------------------------------------------------------
+
+const WEB_TEXT = /\.(html|css|js|webmanifest|json)$/;
+const webFiles = () => repoFiles().filter((f) => f.startsWith('web/') && WEB_TEXT.test(f));
+const webScripts = () => webFiles().filter((f) => f.endsWith('.js'));
+
+// Loads a web script into a sandbox with a bare `window` (no page), for its helpers.
+function loadWebScript(file) {
+  const ctx = vm.createContext({ window: {}, setTimeout, clearTimeout, URLSearchParams });
+  vm.runInContext(read(file), ctx, { filename: file });
+  return ctx.window;
+}
+
+test('VERSION in Code.gs matches EXPECTED_BACKEND_VERSION in web/app.js', () => {
+  const backend = read('apps-script/Code.gs').match(/^const VERSION = (\d+);/m);
+  const web = read('web/app.js').match(/const EXPECTED_BACKEND_VERSION = (\d+);/);
+  assert.ok(backend && web, 'both version lines must exist');
+  assert.strictEqual(web[1], backend[1]);
+  assert.strictEqual(loadWebScript('web/app.js').TwoOfUsApp.EXPECTED_BACKEND_VERSION, Number(backend[1]));
+});
+
+test('user text is never inserted as HTML', () => {
+  for (const file of webScripts()) {
+    const code = read(file);
+    for (const banned of ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'eval(', 'new Function', 'createContextualFragment']) {
+      assert.ok(!code.includes(banned), `${file} uses ${banned}`);
+    }
+  }
+});
+
+test('the app loads nothing from other sites and talks only to Apps Script', () => {
+  const allowed = [/^https:\/\/script\.google\.com(\/|\s|$)/, /^https:\/\/\*\.googleusercontent\.com(\s|$)/, /^http:\/\/www\.w3\.org\/2000\/svg$/];
+  for (const file of webFiles()) {
+    for (const [url] of read(file).matchAll(/(?:https?:)?\/\/[A-Za-z0-9*.-]+\.[A-Za-z]{2,}[^\s'"`)<>;]*/g)) {
+      const full = url.startsWith('//') ? 'https:' + url : url;
+      assert.ok(allowed.some((re) => re.test(full)), `${file} refers to ${url}`);
+    }
+    assert.ok(!/@import|@font-face/.test(read(file)), `${file} loads fonts or stylesheets`);
+  }
+  const html = read('web/index.html');
+  assert.match(html, /connect-src 'self' https:\/\/script\.google\.com https:\/\/\*\.googleusercontent\.com;/);
+  assert.match(html, /script-src 'self'/);
+});
+
+test('the phone stores only the back end address and key', () => {
+  for (const file of webScripts()) {
+    const code = read(file);
+    for (const banned of ['sessionStorage', 'indexedDB', 'document.cookie', 'caches.put', 'openDatabase']) {
+      assert.ok(!code.includes(banned), `${file} uses ${banned}`);
+    }
+    const writes = [...code.matchAll(/localStorage\.setItem\(\s*([^,]*),([^\n]*)/g)].map((m) => m[1] + ' <- ' + m[2].trim());
+    if (file === 'web/app.js') {
+      assert.deepStrictEqual(writes, ['STORE_KEY <- JSON.stringify({ url: link.url, key: link.key }));']);
+    } else {
+      assert.deepStrictEqual(writes, [], `${file} writes to localStorage`);
+    }
+  }
+});
+
+test('setup link: reads the address and key, rejects broken links', () => {
+  const { parseSetupHash } = loadWebScript('web/app.js').TwoOfUsApp;
+  const key = 'k'.repeat(40);
+  const plain = parseSetupHash('#setup=' + FAKE_WEB_APP + '|' + key);
+  assert.strictEqual(plain.url, FAKE_WEB_APP);
+  assert.strictEqual(plain.key, key);
+  const encoded = parseSetupHash('#setup=' + encodeURIComponent(FAKE_WEB_APP + '|' + key));
+  assert.strictEqual(encoded.url, FAKE_WEB_APP);
+  assert.strictEqual(encoded.key, key);
+  const workspace = 'https://script.google.com/a/macros/example.test/s/FAKE/exec';
+  assert.strictEqual(parseSetupHash('#setup=' + workspace + '|' + key).url, workspace);
+
+  assert.strictEqual(parseSetupHash(''), null);
+  assert.strictEqual(parseSetupHash('#other'), null);
+  for (const bad of [
+    '#setup=',
+    '#setup=' + FAKE_WEB_APP,
+    '#setup=' + FAKE_WEB_APP + '|short',
+    '#setup=https://evil.example/exec|' + key,
+    '#setup=http://script.google.com/macros/s/FAKE/exec|' + key,
+    '#setup=' + FAKE_WEB_APP + '|' + key + '<b>',
+    '#setup=%E0%A4%A',
+  ]) {
+    assert.strictEqual(parseSetupHash(bad).bad, true, bad);
+  }
+});
+
+// The demo's pretend back end should answer in the same shape as the real one.
+function shape(v) {
+  if (Array.isArray(v)) return v.length ? [shape(v[v.length - 1])] : [];
+  if (v && typeof v === 'object') return Object.fromEntries(Object.keys(v).sort().map((k) => [k, shape(v[k])]));
+  return v === null ? 'null' : typeof v;
+}
+
+test('demo mode answers like the real back end (made-up names only)', async () => {
+  const fake = loadWebScript('web/demo.js').TwoOfUsDemo.create('');
+  const demo = { request: async (action, params) => JSON.parse(JSON.stringify(await fake.request(action, params))) };
+  const real = loadBackend();
+  real.post(KEY_B, 'setMood', { mood: 'good', note: 'hi' });
+  const realState = real.post(KEY_A, 'setMood', { mood: 'okay', note: 'hello' });
+  const demoState = await demo.request('setMood', { mood: 'okay', note: 'hello' });
+  assert.deepStrictEqual(shape(demoState), shape(realState));
+  assert.deepStrictEqual(demoState.names, { me: 'Sam', partner: 'Alex' });
+  assert.strictEqual(demoState.version, realState.version);
+  assert.strictEqual((await demo.request('setMood', { mood: 'meh' })).error, 'bad_request');
+  assert.strictEqual((await demo.request('clearMood')).moods.me, null);
+});
+
+// ---------------------------------------------------------------------------
 
 async function main() {
   let passed = 0;
